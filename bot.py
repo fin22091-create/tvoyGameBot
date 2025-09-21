@@ -1,15 +1,18 @@
-#import time
-#time.sleep(10) 
-# ждем 10 секунд перед запуском
+import telebot
+import os
 import threading
 import random
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask
-import telebot
 from telebot import types
 import logging
-import os
+import sys
+
+# =======================
+# 🚨 ПРОВЕРКА ЗАПУСКА — чтобы логи появились сразу
+# =======================
+print("🚀 Запуск Telegram-бота...", file=sys.stderr)
 
 # =======================
 # 🔧 НАСТРОЙКИ
@@ -17,7 +20,7 @@ import os
 
 TOKEN = os.getenv('BOT_TOKEN')
 if not TOKEN:
-    raise ValueError("❌ BOT_TOKEN не установлен. Добавь его в Environment Variables.")
+    raise ValueError("❌ BOT_TOKEN не установлен. Добавь его в Environment Variables на Render.")
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 if not DATABASE_URL:
@@ -30,75 +33,92 @@ bot = telebot.TeleBot(TOKEN)
 # =======================
 
 def init_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            name TEXT,
-            best_score INTEGER DEFAULT 0
-        )
-    ''')
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                name TEXT,
+                best_score INTEGER DEFAULT 0
+            )
+        ''')
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("✅ База данных инициализирована", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ Ошибка инициализации БД: {e}", file=sys.stderr)
+        raise
 
 # =======================
 # 💾 ФУНКЦИИ РАБОТЫ С БАЗОЙ
 # =======================
 
 def save_user(user_id, name):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO users (user_id, name, best_score)
-        VALUES (%s, %s, COALESCE((SELECT best_score FROM users WHERE user_id = %s), 0))
-        ON CONFLICT (user_id) DO UPDATE
-        SET name = EXCLUDED.name
-    ''', (user_id, name, user_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO users (user_id, name, best_score)
+            VALUES (%s, %s, COALESCE((SELECT best_score FROM users WHERE user_id = %s), 0))
+            ON CONFLICT (user_id) DO UPDATE
+            SET name = EXCLUDED.name
+        ''', (user_id, name, user_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения пользователя: {e}", file=sys.stderr)
 
 def update_score(user_id, attempts):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-    cursor.execute('SELECT best_score FROM users WHERE user_id = %s', (user_id,))
-    result = cursor.fetchone()
-    current_best = result[0] if result and result[0] > 0 else None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cursor = conn.cursor()
+        cursor.execute('SELECT best_score FROM users WHERE user_id = %s', (user_id,))
+        result = cursor.fetchone()
+        current_best = result[0] if result and result[0] > 0 else None
 
-    if not current_best or attempts < current_best:
-        cursor.execute('UPDATE users SET best_score = %s WHERE user_id = %s', (attempts, user_id))
+        if not current_best or attempts < current_best:
+            cursor.execute('UPDATE users SET best_score = %s WHERE user_id = %s', (attempts, user_id))
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка обновления счёта: {e}", file=sys.stderr)
 
 def get_user_score(user_id):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-    cursor.execute('SELECT best_score FROM users WHERE user_id = %s', (user_id,))
-    result = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    return result[0] if result else None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cursor = conn.cursor()
+        cursor.execute('SELECT best_score FROM users WHERE user_id = %s', (user_id,))
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"❌ Ошибка получения счёта: {e}", file=sys.stderr)
+        return None
 
 def get_top_players(limit=10):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute('''
-        SELECT name, best_score
-        FROM users
-        WHERE best_score > 0
-        ORDER BY best_score ASC
-        LIMIT %s
-    ''', (limit,))
-    results = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return results
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
+            SELECT name, best_score
+            FROM users
+            WHERE best_score > 0
+            ORDER BY best_score ASC
+            LIMIT %s
+        ''', (limit,))
+        results = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return results
+    except Exception as e:
+        print(f"❌ Ошибка получения топа: {e}", file=sys.stderr)
+        return []
 
 # =======================
 # 🤖 ЛОГИКА БОТА
@@ -196,22 +216,22 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Telegram Bot with PostgreSQL is running! Port is open.", 200
+    return "✅ Telegram Bot is running! Port is open.", 200
 
 @app.route('/health')
 def health():
-    return {"status": "ok", "message": "Game bot with DB is alive"}, 200
+    return {"status": "ok", "message": "Bot is alive"}, 200
 
 # =======================
 # 🚀 ЗАПУСК БОТА В ОТДЕЛЬНОМ ПОТОКЕ
 # =======================
 
 def run_bot():
-    time.sleep(10)  # Даём время на завершение предыдущего процесса
     try:
+        print("🤖 Запуск бота...", file=sys.stderr)
         bot.infinity_polling(timeout=10, long_polling_timeout=5, skip_pending=True)
     except Exception as e:
-        logging.error(f"❌ Ошибка бота: {e}")
+        print(f"❌ Ошибка бота: {e}", file=sys.stderr)
 
 # =======================
 # 📊 ЛОГИРОВАНИЕ
@@ -227,11 +247,15 @@ logging.basicConfig(
 # =======================
 
 if __name__ == '__main__':
-    init_db()  # Инициализируем базу
+    print("🔧 Инициализация базы данных...", file=sys.stderr)
+    init_db()
+
+    # Запускаем бота в фоновом потоке
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
 
+    # Запускаем веб-сервер на порту Render
     PORT = int(os.environ.get('PORT', 5000))
-    logging.info(f"🌐 Запуск веб-сервера на порту {PORT}...")
+    print(f"🌐 Запуск веб-сервера на порту {PORT}...", file=sys.stderr)
     app.run(host='0.0.0.0', port=PORT)
