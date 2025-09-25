@@ -8,31 +8,31 @@ from flask import Flask
 from telebot import types
 import logging
 import sys
+from datetime import datetime, timedelta
 
-#тест3. 1
 # =======================
-# 🚨 ПРОВЕРКА ЗАПУСКА — чтобы логи появились сразу
+# 🚨 ПРОВЕРКА ЗАПУСКА
 # =======================
 print("🚀 Запуск Telegram-бота...", file=sys.stderr)
 
 # =======================
 # 🔧 НАСТРОЙКИ
 # =======================
-
 TOKEN = os.getenv('BOT_TOKEN')
 if not TOKEN:
     raise ValueError("❌ BOT_TOKEN не установлен. Добавь его в Environment Variables на Render.")
-
 DATABASE_URL = os.getenv('DATABASE_URL')
 if not DATABASE_URL:
-    raise ValueError("❌ DATABASE_URL не установлен. Добавь его в Environment Variables.")
+    raise ValueError("❌ DATABASE_URL не установлен.")
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=False)  # ← Важно: threaded=False
+
+# Храним игру по user_id (вместо глобальных переменных!)
+user_games = {}  # {user_id: {'number': 42, 'attempts': 3}}
 
 # =======================
 # 🗃️ ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
 # =======================
-
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -55,7 +55,6 @@ def init_db():
 # =======================
 # 💾 ФУНКЦИИ РАБОТЫ С БАЗОЙ
 # =======================
-
 def save_user(user_id, name):
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -63,8 +62,7 @@ def save_user(user_id, name):
         cursor.execute('''
             INSERT INTO users (user_id, name, best_score)
             VALUES (%s, %s, COALESCE((SELECT best_score FROM users WHERE user_id = %s), 0))
-            ON CONFLICT (user_id) DO UPDATE
-            SET name = EXCLUDED.name
+            ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name
         ''', (user_id, name, user_id))
         conn.commit()
         cursor.close()
@@ -79,10 +77,8 @@ def update_score(user_id, attempts):
         cursor.execute('SELECT best_score FROM users WHERE user_id = %s', (user_id,))
         result = cursor.fetchone()
         current_best = result[0] if result and result[0] > 0 else None
-
         if not current_best or attempts < current_best:
             cursor.execute('UPDATE users SET best_score = %s WHERE user_id = %s', (attempts, user_id))
-
         conn.commit()
         cursor.close()
         conn.close()
@@ -124,19 +120,16 @@ def get_top_players(limit=10):
 # =======================
 # 🤖 ЛОГИКА БОТА
 # =======================
-
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
     save_user(user_id, name)
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     btn1 = types.KeyboardButton("🎮 Начать игру")
     btn2 = types.KeyboardButton("🏆 Мой счёт")
     btn3 = types.KeyboardButton("🏅 Топ-10")
     markup.add(btn1, btn2, btn3)
-
     bot.send_message(
         message.chat.id,
         f"Привет, {name}! Я загадаю число от 1 до 100 — попробуй угадать!\nЖми 'Начать игру'.",
@@ -146,13 +139,17 @@ def send_welcome(message):
 @bot.message_handler(func=lambda message: message.text == "🎮 Начать игру")
 def start_game(message):
     user_id = message.from_user.id
-    bot.current_number = random.randint(1, 100)
-    bot.attempts = 0
+    secret_number = random.randint(1, 100)
+    user_games[user_id] = {'number': secret_number, 'attempts': 0}
     bot.send_message(message.chat.id, "Я загадал число от 1 до 100. Какое число?")
     bot.register_next_step_handler(message, guess_number)
 
 def guess_number(message):
     user_id = message.from_user.id
+    if user_id not in user_games:
+        bot.reply_to(message, "Сначала начни игру!")
+        return
+
     try:
         guess = int(message.text)
     except ValueError:
@@ -160,31 +157,30 @@ def guess_number(message):
         bot.register_next_step_handler(message, guess_number)
         return
 
-    bot.attempts += 1
+    game = user_games[user_id]
+    game['attempts'] += 1
 
-    if guess < bot.current_number:
+    if guess < game['number']:
         bot.reply_to(message, "Больше! 📈")
         bot.register_next_step_handler(message, guess_number)
-    elif guess > bot.current_number:
+    elif guess > game['number']:
         bot.reply_to(message, "Меньше! 📉")
         bot.register_next_step_handler(message, guess_number)
     else:
-        bot.reply_to(message, f"🎉 Поздравляю! Ты угадал за {bot.attempts} попыток!")
-        update_score(user_id, bot.attempts)
-
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        bot.reply_to(message, f"🎉 Поздравляю! Ты угадал за {game['attempts']} попыток!")
+        update_score(user_id, game['attempts'])
+        user_games.pop(user_id, None)  # Удаляем игру
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
         btn1 = types.KeyboardButton("🎮 Сыграть ещё")
         btn2 = types.KeyboardButton("🏆 Мой счёт")
         btn3 = types.KeyboardButton("🏅 Топ-10")
         markup.add(btn1, btn2, btn3)
-
         bot.send_message(message.chat.id, "Выбери действие:", reply_markup=markup)
 
 @bot.message_handler(func=lambda message: message.text == "🏆 Мой счёт")
 def show_score(message):
     user_id = message.from_user.id
     score = get_user_score(user_id)
-
     if score and score > 0:
         bot.reply_to(message, f"🏆 Твой лучший результат: {score} попыток")
     else:
@@ -198,26 +194,22 @@ def play_again(message):
 @bot.message_handler(func=lambda message: message.text == "🏅 Топ-10")
 def show_top_players(message):
     results = get_top_players(10)
-
     if not results:
         bot.reply_to(message, "Пока нет рекордов. Сыграй и установи свой!")
         return
-
-    text = "🏆 *ТОП-10 ЛУЧШИХ ИГРОКОВ*\n\n"
+    text = "🏆 *ТОП-10 ЛУЧШИХ ИГРОКОВ*\n"
     for i, row in enumerate(results, 1):
         text += f"{i}. {row['name']} — {row['best_score']} попыток\n"
-
     bot.reply_to(message, text, parse_mode="Markdown")
 
 # =======================
-# 🌐 ВЕБ-СЕРВЕР (чтобы Render не ругался)
+# 🌐 ВЕБ-СЕРВЕР (для Render)
 # =======================
-
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Telegram Bot is running! Port is open.", 200
+    return "✅ Telegram Bot is running!", 200
 
 @app.route('/health')
 def health():
@@ -226,37 +218,22 @@ def health():
 # =======================
 # 🚀 ЗАПУСК БОТА В ОТДЕЛЬНОМ ПОТОКЕ
 # =======================
-
 def run_bot():
     try:
         print("🤖 Запуск бота...", file=sys.stderr)
-        bot.infinity_polling(timeout=10, long_polling_timeout=5, skip_pending=True)
+        bot.infinity_polling(skip_pending=True)
     except Exception as e:
         print(f"❌ Ошибка бота: {e}", file=sys.stderr)
 
 # =======================
-# 📊 ЛОГИРОВАНИЕ
-# =======================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
-# =======================
 # ▶️ ЗАПУСК
 # =======================
-
 if __name__ == '__main__':
     print("🔧 Инициализация базы данных...", file=sys.stderr)
     init_db()
-
-    # Запускаем бота в фоновом потоке
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
-
-    # Запускаем веб-сервер на порту Render
     PORT = int(os.environ.get('PORT', 5000))
     print(f"🌐 Запуск веб-сервера на порту {PORT}...", file=sys.stderr)
     app.run(host='0.0.0.0', port=PORT)
